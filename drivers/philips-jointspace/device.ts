@@ -21,6 +21,7 @@ import {
   ScreenState,
 } from "./types";
 import { NotFoundError } from "./errors";
+import { resolveMacAddress, selectWakeMac } from "./mac";
 
 const CAPABILITY_DEBOUNCE_MS = 100;
 const INIT_OFF_FALLBACK_MS = 3_000;
@@ -129,6 +130,7 @@ const STORE_SCREEN_STATE_SUPPORTED = "screenStateSupported";
 const STORE_CURRENT_SOURCE_SUPPORTED = "currentSourceSupported";
 const STORE_CREDENTIALS = "credentials";
 const STORE_CANONICAL_ID = "canonicalId";
+const STORE_MAC = "mac";
 
 const CAPABILITY_SCREEN_ON = "screen_on";
 const CAPABILITY_CURRENT_SOURCE = "current_source";
@@ -167,6 +169,7 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
 
     await this.migrateCapabilities();
     await this.migrateCredentialsToStore();
+    await this.migrateMacToStore();
 
     const debug = this.homey.env?.DEBUG === "true";
     this.api = new JointspaceApi(this.buildApiConfig(), {
@@ -846,6 +849,31 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
     }
   }
 
+  private readWakeMac(): string | null {
+    return selectWakeMac(this.getStoreValue(STORE_MAC), this.deviceData.mac);
+  }
+
+  private async migrateMacToStore(): Promise<void> {
+    if (this.getStoreValue(STORE_MAC)) return;
+    const mac = selectWakeMac(null, this.deviceData.mac);
+    if (!mac) return;
+    await this.setStoreValue(STORE_MAC, mac).catch((err: Error) =>
+      this.error("Failed to migrate MAC to store:", err),
+    );
+  }
+
+  private async backfillMacFromArp(): Promise<void> {
+    if (this.readWakeMac()) return;
+    try {
+      const mac = await resolveMacAddress((this.homey as any).arp, this.deviceSettings.ipAddress, 3_000);
+      if (!mac) return;
+      await this.setStoreValue(STORE_MAC, mac);
+      this.log("Backfilled Wake-on-LAN MAC from ARP");
+    } catch (err) {
+      this.log("MAC backfill skipped:", (err as Error).message);
+    }
+  }
+
   /**
    * One-time backfill: compute and persist this TV's canonical id (serial-X,
    * uuid-X, mdns-X, ip-X - see extractCanonicalId for ordering) into the
@@ -890,6 +918,7 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
       await this.setStoreValue(STORE_NOTIFY_CHANGE_SUPPORTED, notifyChangeSupported);
       await this.setStoreValue(STORE_PAIRING_TYPE, pairingType);
       await this.backfillCanonicalId(system);
+      await this.backfillMacFromArp();
 
       await this.probeScreenStateSupport();
       await this.probeCurrentSourceSupport();
@@ -1101,8 +1130,8 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
 
   private async onCapabilityOnOffSet(value: boolean): Promise<void> {
     this.log(`Powering ${value ? "on" : "off"}`);
-    if (value && this.deviceData.mac) {
-      const mac = this.deviceData.mac;
+    const mac = this.readWakeMac();
+    if (value && mac) {
       wol.wake(mac).catch((err: Error) => this.log("WOL failed:", err.message));
       // Second magic packet in case the first dropped on the wire.
       if (this.wolRetryTimer) this.homey.clearTimeout(this.wolRetryTimer);

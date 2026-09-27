@@ -9,6 +9,7 @@ import {
   renderMarkdown,
 } from "./drivers/philips-jointspace/diagnostic";
 import { JointspaceApi } from "./drivers/philips-jointspace/jointspace-api";
+import { resolveMacAddress } from "./drivers/philips-jointspace/mac";
 
 const DRIVER_ID = "philips-jointspace";
 
@@ -153,13 +154,8 @@ function runInBackground(
 
 async function collectNetworkForIp(homey: any, ip: string): Promise<NetworkSnapshot> {
   try {
-    const mac = await Promise.race([
-      homey.arp.getMAC(ip),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("ARP lookup timed out after 8s")), 8000),
-      ),
-    ]);
-    return { ip, arpMac: typeof mac === "string" && mac.length > 0 ? mac : undefined };
+    const mac = await resolveMacAddress(homey.arp, ip);
+    return { ip, arpMac: mac ?? undefined };
   } catch (err) {
     return { ip, arpError: humaniseArpError((err as Error).message) };
   }

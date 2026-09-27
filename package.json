@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.js",
     "homey-validate": "homey app validate --level verified",
     "homey-build": "homey app build",
     "homey-run": "homey app run"

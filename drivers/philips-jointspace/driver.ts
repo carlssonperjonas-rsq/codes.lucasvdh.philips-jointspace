@@ -27,6 +27,7 @@ import {
   legacyUsnToCanonicalId,
   osRequiresHttpsForAuthenticatedEndpoints,
 } from "./quirks";
+import { resolveMacAddress } from "./mac";
 
 interface DiscoveryHint {
   usn?: string;
@@ -227,6 +228,7 @@ class PhilipsTvDriver extends Homey.Driver {
     // STALE credentials and the device would 401 against the new TV until
     // the next restart.
     await device.setStoreValue("credentials", { user: credentials.user, pass: credentials.pass });
+    await device.setStoreValue("mac", descriptor.data.mac);
     await device.setStoreValue("osType", null);
     await device.setStoreValue("notifyChangeSupported", null);
     await device.setStoreValue("pairingType", descriptor.pairingType ?? null);
@@ -480,7 +482,19 @@ class PhilipsTvDriver extends Homey.Driver {
       mdnsName: hint?.mdnsName,
       ip,
     });
+    descriptor.data.mac = await this.resolveMac(ip);
     return descriptor;
+  }
+
+  private async resolveMac(ip: string): Promise<string | null> {
+    try {
+      const mac = await resolveMacAddress((this.homey as any).arp, ip);
+      if (!mac) this.log(`ARP returned no valid MAC for ${ip}; Wake-on-LAN will be unavailable until backfill succeeds`);
+      return mac;
+    } catch (err) {
+      this.log(`Could not resolve MAC for ${ip}:`, (err as Error).message);
+      return null;
+    }
   }
 
   /**

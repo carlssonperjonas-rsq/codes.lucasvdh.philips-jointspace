@@ -399,7 +399,16 @@ export class JointspaceApi {
 
   async setPowerState(on: boolean): Promise<void> {
     if (!on) {
-      await this.request<unknown>({ method: "POST", path: "powerstate", data: { powerstate: "Standby" } });
+      try {
+        await this.request<unknown>({ method: "POST", path: "powerstate", data: { powerstate: "Standby" } });
+      } catch (err) {
+        // SAPHI/Linux TVs such as the PQS7801 expose power state through
+        // notifyChange but return 404 for the dedicated /powerstate endpoint.
+        // Their remote-control endpoint still accepts the Standby key.
+        if (!(err instanceof NotFoundError)) throw err;
+        this.log("powerstate endpoint not found; falling back to input key Standby");
+        await this.sendKey("Standby");
+      }
       return;
     }
     try {

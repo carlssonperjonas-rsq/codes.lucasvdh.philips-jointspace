@@ -147,7 +147,7 @@ function snapshotDevice(device: Homey.Device): DeviceSnapshot {
     id: String(data.id ?? device.getName()),
     name: device.getName(),
     hasCredentials: Boolean(data.credentials?.user && data.credentials?.pass),
-    mac: data.mac ?? null,
+    mac: (device.getStoreValue("mac") as string | null) ?? data.mac ?? null,
     settings,
     store,
     capabilities,
@@ -393,6 +393,7 @@ export function renderMarkdown(report: DiagnosticReport): string {
     lines.push(`- Name: ${device.name}`);
     lines.push(`- Data id: ${device.id}`);
     lines.push(`- Has credentials: ${device.hasCredentials ? "yes" : "no"}`);
+    lines.push(`- Wake-on-LAN MAC stored: ${device.mac ? "yes" : "no"}`);
     lines.push("");
     lines.push("### Settings");
     lines.push("```json");
@@ -426,7 +427,7 @@ export function renderMarkdown(report: DiagnosticReport): string {
     lines.push("");
     lines.push(`- Configured IP: \`${report.network.ip}\``);
     if (report.network.arpMac) {
-      lines.push(`- ARP-resolved MAC: \`${report.network.arpMac}\` (would enable Wake-on-LAN)`);
+      lines.push(`- ARP-resolved MAC: \`${report.network.arpMac}\``);
     } else if (report.network.arpError) {
       lines.push(`- ARP lookup failed: ${report.network.arpError}`);
     } else {
