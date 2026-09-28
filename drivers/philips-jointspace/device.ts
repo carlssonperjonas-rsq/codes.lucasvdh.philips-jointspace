@@ -1144,7 +1144,10 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
       }, WOL_RETRY_DELAY_MS);
     }
     try {
-      await this.api.setPowerState(value);
+      const osType = this.getStoreValue(STORE_OS_TYPE) as string | null;
+      await this.api.setPowerState(value, {
+        forceStandbyKey: !value && osType?.trim().toLowerCase() === "linux",
+      });
       this.log(`Successfully sent power ${value ? "on" : "off"}`);
     } catch (err) {
       this.log("setPowerState failed", err);

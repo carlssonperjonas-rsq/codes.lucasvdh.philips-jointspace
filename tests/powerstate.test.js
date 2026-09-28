@@ -51,3 +51,31 @@ test("does not send Standby when the normal powerstate endpoint succeeds", async
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, "powerstate");
 });
+
+test("also sends Standby when SAPHI returns success without acting on powerstate", async () => {
+  const calls = [];
+  const api = createApi(async (options) => {
+    calls.push(options);
+    return {};
+  });
+
+  await api.setPowerState(false, { forceStandbyKey: true });
+
+  assert.deepEqual(calls, [
+    { method: "POST", path: "powerstate", data: { powerstate: "Standby" } },
+    { method: "POST", path: "input/key", data: { key: "Standby" } },
+  ]);
+});
+
+test("sends Standby only once when SAPHI powerstate is missing", async () => {
+  const calls = [];
+  const api = createApi(async (options) => {
+    calls.push(options);
+    if (options.path === "powerstate") throw new NotFoundError();
+    return {};
+  });
+
+  await api.setPowerState(false, { forceStandbyKey: true });
+
+  assert.equal(calls.filter((call) => call.path === "input/key").length, 1);
+});

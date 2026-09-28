@@ -397,8 +397,9 @@ export class JointspaceApi {
     return this.request<PowerState>({ method: "GET", path: "powerstate" });
   }
 
-  async setPowerState(on: boolean): Promise<void> {
+  async setPowerState(on: boolean, options: { forceStandbyKey?: boolean } = {}): Promise<void> {
     if (!on) {
+      let standbyKeySent = false;
       try {
         await this.request<unknown>({ method: "POST", path: "powerstate", data: { powerstate: "Standby" } });
       } catch (err) {
@@ -407,6 +408,11 @@ export class JointspaceApi {
         // Their remote-control endpoint still accepts the Standby key.
         if (!(err instanceof NotFoundError)) throw err;
         this.log("powerstate endpoint not found; falling back to input key Standby");
+        await this.sendKey("Standby");
+        standbyKeySent = true;
+      }
+      if (options.forceStandbyKey && !standbyKeySent) {
+        this.log("powerstate request completed on SAPHI/Linux; also sending input key Standby");
         await this.sendKey("Standby");
       }
       return;
