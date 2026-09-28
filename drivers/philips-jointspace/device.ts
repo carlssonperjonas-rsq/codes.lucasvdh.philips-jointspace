@@ -170,6 +170,10 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
     await this.migrateCapabilities();
     await this.migrateCredentialsToStore();
     await this.migrateMacToStore();
+    // Wake-on-LAN must not depend on a successful JointSpace /system probe.
+    // SAPHI TVs may already be asleep when the app starts, while Homey's ARP
+    // cache can still provide the MAC address needed to wake them again.
+    await this.backfillMacFromArp();
 
     const debug = this.homey.env?.DEBUG === "true";
     this.api = new JointspaceApi(this.buildApiConfig(), {
@@ -865,7 +869,7 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
   private async backfillMacFromArp(): Promise<void> {
     if (this.readWakeMac()) return;
     try {
-      const mac = await resolveMacAddress((this.homey as any).arp, this.deviceSettings.ipAddress, 3_000);
+      const mac = await resolveMacAddress((this.homey as any).arp, this.deviceSettings.ipAddress);
       if (!mac) return;
       await this.setStoreValue(STORE_MAC, mac);
       this.log("Backfilled Wake-on-LAN MAC from ARP");
