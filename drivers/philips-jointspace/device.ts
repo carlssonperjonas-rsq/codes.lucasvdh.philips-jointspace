@@ -174,6 +174,12 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
     // SAPHI TVs may already be asleep when the app starts, while Homey's ARP
     // cache can still provide the MAC address needed to wake them again.
     await this.backfillMacFromArp();
+    // An offline TV with a known MAC is still controllable through Wake-on-LAN.
+    // Clear any persisted unavailable state from an earlier polling failure so
+    // Homey keeps the on/off capability usable while the TV is in standby.
+    if (this.readWakeMac()) {
+      await this.setAvailable().catch(this.error.bind(this));
+    }
 
     const debug = this.homey.env?.DEBUG === "true";
     this.api = new JointspaceApi(this.buildApiConfig(), {
@@ -736,8 +742,13 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
     // own heuristic may silently mark the device unavailable based on
     // capability-update timing - confusing because we don't know why.
     if (this.consecutivePollFailures === 3) {
-      this.log("3 consecutive poll failures; setting device unavailable");
-      this.setUnavailable(`TV unreachable: ${error.message}`).catch(this.error.bind(this));
+      if (this.readWakeMac()) {
+        this.log("3 consecutive poll failures; TV is off but remains available for Wake-on-LAN");
+        this.setAvailable().catch(this.error.bind(this));
+      } else {
+        this.log("3 consecutive poll failures; setting device unavailable");
+        this.setUnavailable(`TV unreachable: ${error.message}`).catch(this.error.bind(this));
+      }
     }
     // If polls keep failing while we think the advertised transport is fine,
     // the TV's HTTPS service may have died mid-session. Trigger one
