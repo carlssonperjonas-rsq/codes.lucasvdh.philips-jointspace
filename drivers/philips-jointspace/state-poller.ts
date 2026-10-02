@@ -207,6 +207,7 @@ export class StatePoller {
     ];
 
     let anySucceeded = false;
+    let powerStateSucceeded = false;
     let transportError: Error | undefined;
 
     for (let i = 0; i < steps.length; i++) {
@@ -222,6 +223,7 @@ export class StatePoller {
         if (this.debug) this.log(`  poll[${step.name}] = ${this.summarise(value)}`);
         step.apply(value);
         anySucceeded = true;
+        if (step.name === "powerstate") powerStateSucceeded = true;
       } catch (err) {
         if (err instanceof OfflineError) {
           // Connectivity error - bail; no point hammering an unreachable TV.
@@ -236,6 +238,13 @@ export class StatePoller {
     }
 
     if (anySucceeded) {
+      // SAPHI/Linux can expose authenticated state endpoints while omitting
+      // GET /powerstate entirely. A completed poll proves the TV is awake;
+      // without this inference Homey remains stuck at off and its next toggle
+      // sends Wake-on-LAN instead of the Standby command.
+      if (!powerStateSucceeded && !transportError) {
+        this.listener.handlePowerStateChange("poll", { powerstate: "On" });
+      }
       this.noteReachable();
       this.listener.onPollSuccess?.();
     }
