@@ -211,6 +211,45 @@ export class JointspaceApi {
   }
 
   /**
+   * Short anonymous probes used only for local DHCP address recovery. Try
+   * the paired TV's advertised transport first, then the other common
+   * transport. Unlike getSystem(), this never sends pairing credentials and
+   * doesn't try version-prefixed paths.
+   */
+  async probeSystemAnonymous(timeoutMs = 1_000): Promise<SystemInfo> {
+    const transports: Array<{ protocol: Protocol; port: number }> = this.config.secured
+      ? [
+        { protocol: "https", port: HTTPS_PORT },
+        { protocol: "http", port: HTTP_PORT },
+      ]
+      : [
+        { protocol: "http", port: HTTP_PORT },
+        { protocol: "https", port: HTTPS_PORT },
+      ];
+
+    let firstError: unknown;
+    for (const transport of transports) {
+      try {
+        const system = await this.requestWithCredentials<SystemInfo>({
+          method: "GET",
+          path: "system",
+          port: transport.port,
+          protocol: transport.protocol,
+          prefixApiVersion: false,
+          timeoutMs,
+          requireAuth: false,
+        }, undefined);
+        if (system?.api_version?.Major) return system;
+      } catch (err) {
+        if (!firstError) firstError = err;
+      }
+    }
+
+    if (firstError instanceof Error) throw firstError;
+    throw new InvalidResponseError("Anonymous system probe returned no api_version");
+  }
+
+  /**
    * Returns the protocol+port that last successfully served GET /system,
    * or null if no successful system probe has happened yet. Callers can use
    * this to skip a redundant HTTPS verify probe when getSystem just proved

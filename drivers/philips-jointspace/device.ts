@@ -22,6 +22,12 @@ import {
 } from "./types";
 import { NotFoundError } from "./errors";
 import { resolveMacAddress, selectWakeMac } from "./mac";
+import {
+  DiscoveryAddressCandidate,
+  findAddressByMac,
+  findAddressBySystemIdentity,
+  findRecoveredAddress,
+} from "./address-recovery";
 
 const CAPABILITY_DEBOUNCE_MS = 100;
 const INIT_OFF_FALLBACK_MS = 3_000;
@@ -160,6 +166,8 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
   private wolRetryTimer?: NodeJS.Timeout;
   private consecutivePollFailures = 0;
   private failureTriggeredRefresh = false;
+  private failureRunStartedWhileOn = false;
+  private addressRecoveryFailureCount = 0;
   private screenOnListenerRegistered = false;
 
   async onInit(): Promise<void> {
@@ -732,8 +740,18 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
   }
 
   onPollFailure(error: Error): void {
+    const wasOn = Boolean(this.getCapabilityValue("onoff"));
     this.consecutivePollFailures += 1;
-    if (this.getCapabilityValue("onoff")) {
+    if (wasOn && !this.failureRunStartedWhileOn) {
+      // Keep this counter separate from the general poll-failure count. The
+      // latter may already contain standby or transient HTTPS failures when
+      // the TV receives a new DHCP lease.
+      this.failureRunStartedWhileOn = true;
+      this.addressRecoveryFailureCount = 1;
+    } else if (this.failureRunStartedWhileOn) {
+      this.addressRecoveryFailureCount += 1;
+    }
+    if (wasOn) {
       this.log("Poll failed; marking TV off:", error.message);
       this.setCapabilityValue("onoff", false).catch(this.error.bind(this));
     }
@@ -750,15 +768,21 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
         this.setUnavailable(`TV unreachable: ${error.message}`).catch(this.error.bind(this));
       }
     }
-    // If polls keep failing while we think the advertised transport is fine,
-    // the TV's HTTPS service may have died mid-session. Trigger one
-    // refreshSystemMetadata so verifyAdvertisedTransport can flip us back to
-    // HTTP/1925 quickly instead of waiting for the hourly probe. Gate this
-    // with a flag so we only fire once per failure run.
-    if (this.consecutivePollFailures === 5 && !this.failureTriggeredRefresh) {
+    // DHCP may have moved the TV. At the third failure and then every fifteenth
+    // failure, inspect Homey's Philips discovery cache and verify candidates
+    // against the paired TV's canonical id before changing its address.
+    // Retry while the failure run continues because mDNS/SSDP can lag DHCP.
+    const shouldRecoverAddress =
+      this.failureRunStartedWhileOn &&
+      (this.addressRecoveryFailureCount === 3 || this.addressRecoveryFailureCount % 15 === 0);
+    if (shouldRecoverAddress && !this.failureTriggeredRefresh) {
       this.failureTriggeredRefresh = true;
-      this.log(`${this.consecutivePollFailures} consecutive poll failures; re-verifying transport`);
-      void this.refreshSystemMetadata();
+      this.log(`${this.consecutivePollFailures} consecutive poll failures; checking discovery for a DHCP address change`);
+      void this.recoverAddressFromDiscovery()
+        .then((recovered) => recovered ? undefined : this.refreshSystemMetadata())
+        .finally(() => {
+          this.failureTriggeredRefresh = false;
+        });
     }
   }
 
@@ -767,6 +791,8 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
       this.log(`Poll recovered after ${this.consecutivePollFailures} failure(s)`);
       this.consecutivePollFailures = 0;
       this.failureTriggeredRefresh = false;
+      this.failureRunStartedWhileOn = false;
+      this.addressRecoveryFailureCount = 0;
     }
     // Reaffirm availability on every successful poll. Cheap to call when
     // already available; restores availability if Homey's own heuristic
@@ -914,6 +940,102 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
 
   private driverApi(): PhilipsTvDriverLike {
     return this.driver as unknown as PhilipsTvDriverLike;
+  }
+
+  private async recoverAddressFromDiscovery(): Promise<boolean> {
+    const expectedCanonicalId = String(
+      this.getStoreValue(STORE_CANONICAL_ID) ?? this.deviceData.id ?? "",
+    );
+    if (!expectedCanonicalId || expectedCanonicalId.startsWith("ip-")) {
+      this.log("DHCP recovery skipped: paired device has no stable canonical id");
+      return false;
+    }
+
+    try {
+      const ssdp = Object.values(
+        this.homey.discovery.getStrategy("philips-tv-discovery").getDiscoveryResults(),
+      ) as Array<{ id: string; address: string }>;
+      const mdns = Object.values(
+        this.homey.discovery.getStrategy("philips-tv-mdns").getDiscoveryResults(),
+      ) as Array<{ id: string; address: string }>;
+      const candidates: DiscoveryAddressCandidate[] = [
+        ...ssdp.map((result) => ({ ...result, source: "ssdp" as const })),
+        ...mdns.map((result) => ({ ...result, source: "mdns" as const })),
+      ];
+
+      const probeSystem = async (candidate: DiscoveryAddressCandidate) => {
+        const probe = new JointspaceApi(
+          {
+            host: candidate.address,
+            apiVersion: this.deviceSettings.apiVersion,
+            secured: this.deviceSettings.secure ?? false,
+            port: this.deviceSettings.port ?? JointspaceApi.portForApiVersion(this.deviceSettings.apiVersion),
+            credentials: this.readCredentials(),
+          },
+          { log: (...args) => this.log("[dhcp-recovery]", ...args) },
+        );
+        return probe.getSystem();
+      };
+
+      let recoveredAddress = await findRecoveredAddress({
+        candidates,
+        currentAddress: this.deviceSettings.ipAddress,
+        expectedCanonicalId,
+        probeSystem,
+      });
+      if (!recoveredAddress) {
+        this.log("Discovery had no identity match; probing the local /24 anonymously for the paired TV");
+        recoveredAddress = await findAddressBySystemIdentity({
+          currentAddress: this.deviceSettings.ipAddress,
+          expectedCanonicalId,
+          probeSystem: async (address) => {
+            const anonymousProbe = new JointspaceApi(
+              {
+                host: address,
+                apiVersion: this.deviceSettings.apiVersion,
+                secured: this.deviceSettings.secure ?? false,
+                port: this.deviceSettings.port
+                  ?? JointspaceApi.portForApiVersion(this.deviceSettings.apiVersion),
+              },
+              { log: () => undefined },
+            );
+            return anonymousProbe.probeSystemAnonymous(1_000);
+          },
+        });
+      }
+      if (!recoveredAddress) {
+        const wakeMac = this.readWakeMac();
+        if (wakeMac) {
+          this.log("Anonymous system probe had no identity match; scanning the local /24 for the paired MAC");
+          const arpAddress = await findAddressByMac({
+            currentAddress: this.deviceSettings.ipAddress,
+            expectedMac: wakeMac,
+            resolveMac: (address) => resolveMacAddress((this.homey as any).arp, address, 1_500),
+          });
+          if (arpAddress) {
+            recoveredAddress = await findRecoveredAddress({
+              candidates: [{ id: "arp-mac-match", address: arpAddress, source: "arp" }],
+              currentAddress: this.deviceSettings.ipAddress,
+              expectedCanonicalId,
+              probeSystem,
+            });
+          }
+        }
+      }
+      if (!recoveredAddress) {
+        this.log(`DHCP recovery found no identity-matched TV among ${candidates.length} discovery result(s)`);
+        return false;
+      }
+
+      this.log("Verified DHCP address change; updating TV settings");
+      await this.setSettings({ ipAddress: recoveredAddress });
+      this.deviceSettings = { ...this.deviceSettings, ipAddress: recoveredAddress };
+      this.api.updateConfig(this.buildApiConfig());
+      return true;
+    } catch (err) {
+      this.log("DHCP address recovery failed:", (err as Error).message);
+      return false;
+    }
   }
 
   /**
@@ -1147,6 +1269,11 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
     this.log(`Powering ${value ? "on" : "off"}`);
     const mac = this.readWakeMac();
     if (value && mac) {
+      // If the TV moved while asleep, make the next failed poll trigger the
+      // DHCP recovery path promptly instead of inheriting a long-running
+      // standby failure count.
+      this.failureRunStartedWhileOn = true;
+      this.addressRecoveryFailureCount = 2;
       wol.wake(mac).catch((err: Error) => this.log("WOL failed:", err.message));
       // Second magic packet in case the first dropped on the wire.
       if (this.wolRetryTimer) this.homey.clearTimeout(this.wolRetryTimer);
