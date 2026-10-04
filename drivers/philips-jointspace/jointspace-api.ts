@@ -436,9 +436,40 @@ export class JointspaceApi {
     return this.request<PowerState>({ method: "GET", path: "powerstate" });
   }
 
-  async setPowerState(on: boolean, options: { forceStandbyKey?: boolean } = {}): Promise<void> {
+  async setPowerState(
+    on: boolean,
+    options: {
+      forceStandbyKey?: boolean;
+      guardStandbyKeyWithScreenState?: boolean;
+      standbyVerificationDelayMs?: number;
+    } = {},
+  ): Promise<void> {
     if (!on) {
       let standbyKeySent = false;
+      let standbyKeyAllowed = true;
+
+      // `Standby` is a toggle on SAPHI/Linux: sending it while the TV is
+      // already in standby wakes the TV. Use the absolute screen state as a
+      // guard. If the state is unknown, fail safe and only try the absolute
+      // /powerstate request below; never send the toggle key blindly.
+      if (options.guardStandbyKeyWithScreenState) {
+        try {
+          const screen = await this.getScreenState();
+          const state = screen?.screenstate;
+          if (state === "Off" || state === "screenOff") {
+            this.log("screenstate is already Off; skipping Standby toggle");
+            return;
+          }
+          standbyKeyAllowed = state === "On" || state === "screenOn";
+          if (!standbyKeyAllowed) {
+            this.log(`screenstate=${String(state)} is not an explicit On state; suppressing Standby toggle`);
+          }
+        } catch (err) {
+          standbyKeyAllowed = false;
+          this.log("screenstate probe failed; suppressing unsafe Standby toggle:", err);
+        }
+      }
+
       try {
         await this.request<unknown>({ method: "POST", path: "powerstate", data: { powerstate: "Standby" } });
       } catch (err) {
@@ -446,11 +477,36 @@ export class JointspaceApi {
         // notifyChange but return 404 for the dedicated /powerstate endpoint.
         // Their remote-control endpoint still accepts the Standby key.
         if (!(err instanceof NotFoundError)) throw err;
+        if (!standbyKeyAllowed) {
+          this.log("powerstate endpoint not found; Standby toggle suppressed because screen was not confirmed On");
+          return;
+        }
         this.log("powerstate endpoint not found; falling back to input key Standby");
         await this.sendKey("Standby");
         standbyKeySent = true;
       }
-      if (options.forceStandbyKey && !standbyKeySent) {
+      if (options.forceStandbyKey && standbyKeyAllowed && !standbyKeySent) {
+        if (options.guardStandbyKeyWithScreenState) {
+          const delayMs = options.standbyVerificationDelayMs ?? 750;
+          if (delayMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          }
+          try {
+            const verified = await this.getScreenState();
+            const state = verified?.screenstate;
+            if (state === "Off" || state === "screenOff") {
+              this.log("powerstate request turned the screen Off; Standby toggle is unnecessary");
+              return;
+            }
+            if (state !== "On" && state !== "screenOn") {
+              this.log(`post-powerstate screenstate=${String(state)} is not explicit On; suppressing Standby toggle`);
+              return;
+            }
+          } catch (err) {
+            this.log("post-powerstate screenstate probe failed; suppressing unsafe Standby toggle:", err);
+            return;
+          }
+        }
         this.log("powerstate request completed on SAPHI/Linux; also sending input key Standby");
         await this.sendKey("Standby");
       }

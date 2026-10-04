@@ -1283,8 +1283,10 @@ class PhilipsTvDevice extends Homey.Device implements StateChangeListener {
     }
     try {
       const osType = this.getStoreValue(STORE_OS_TYPE) as string | null;
+      const isSaphiLinux = osType?.trim().toLowerCase() === "linux";
       await this.api.setPowerState(value, {
-        forceStandbyKey: !value && osType?.trim().toLowerCase() === "linux",
+        forceStandbyKey: !value && isSaphiLinux,
+        guardStandbyKeyWithScreenState: !value && isSaphiLinux,
       });
       this.log(`Successfully sent power ${value ? "on" : "off"}`);
     } catch (err) {

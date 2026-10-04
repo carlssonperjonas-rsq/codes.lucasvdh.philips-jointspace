@@ -79,3 +79,102 @@ test("sends Standby only once when SAPHI powerstate is missing", async () => {
 
   assert.equal(calls.filter((call) => call.path === "input/key").length, 1);
 });
+
+test("absolute off is a no-op when SAPHI screenstate is already Off", async () => {
+  const calls = [];
+  const api = createApi(async (options) => {
+    calls.push(options);
+    if (options.path === "screenstate") return { screenstate: "Off" };
+    throw new Error(`unexpected request: ${options.path}`);
+  });
+
+  await api.setPowerState(false, {
+    forceStandbyKey: true,
+    guardStandbyKeyWithScreenState: true,
+  });
+
+  assert.deepEqual(calls, [
+    { method: "GET", path: "screenstate" },
+  ]);
+});
+
+test("absolute off sends exactly one Standby key when SAPHI screenstate is On", async () => {
+  const calls = [];
+  const api = createApi(async (options) => {
+    calls.push(options);
+    if (options.path === "screenstate") return { screenstate: "On" };
+    return {};
+  });
+
+  await api.setPowerState(false, {
+    forceStandbyKey: true,
+    guardStandbyKeyWithScreenState: true,
+    standbyVerificationDelayMs: 0,
+  });
+
+  assert.deepEqual(calls, [
+    { method: "GET", path: "screenstate" },
+    { method: "POST", path: "powerstate", data: { powerstate: "Standby" } },
+    { method: "GET", path: "screenstate" },
+    { method: "POST", path: "input/key", data: { key: "Standby" } },
+  ]);
+});
+
+test("absolute off does not toggle when powerstate already turned SAPHI off", async () => {
+  const calls = [];
+  let screenReads = 0;
+  const api = createApi(async (options) => {
+    calls.push(options);
+    if (options.path === "screenstate") {
+      screenReads += 1;
+      return { screenstate: screenReads === 1 ? "On" : "Off" };
+    }
+    return {};
+  });
+
+  await api.setPowerState(false, {
+    forceStandbyKey: true,
+    guardStandbyKeyWithScreenState: true,
+    standbyVerificationDelayMs: 0,
+  });
+
+  assert.deepEqual(calls, [
+    { method: "GET", path: "screenstate" },
+    { method: "POST", path: "powerstate", data: { powerstate: "Standby" } },
+    { method: "GET", path: "screenstate" },
+  ]);
+});
+
+test("absolute off never sends the Standby toggle when screenstate is unknown", async () => {
+  const calls = [];
+  const api = createApi(async (options) => {
+    calls.push(options);
+    if (options.path === "screenstate") throw new OfflineError("screen probe failed");
+    if (options.path === "powerstate") throw new NotFoundError();
+    return {};
+  });
+
+  await api.setPowerState(false, {
+    forceStandbyKey: true,
+    guardStandbyKeyWithScreenState: true,
+  });
+
+  assert.deepEqual(calls, [
+    { method: "GET", path: "screenstate" },
+    { method: "POST", path: "powerstate", data: { powerstate: "Standby" } },
+  ]);
+});
+
+test("absolute on sends only the non-toggle On command", async () => {
+  const calls = [];
+  const api = createApi(async (options) => {
+    calls.push(options);
+    return {};
+  });
+
+  await api.setPowerState(true);
+
+  assert.deepEqual(calls, [
+    { method: "POST", path: "powerstate", data: { powerstate: "On" } },
+  ]);
+});

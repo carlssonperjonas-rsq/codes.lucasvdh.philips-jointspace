@@ -1,6 +1,6 @@
 {
   "name": "philips-jointspace",
-  "version": "3.7.10",
+  "version": "3.7.11",
   "private": true,
   "main": "app.js",
   "engines": {

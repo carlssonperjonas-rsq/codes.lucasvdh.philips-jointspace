@@ -203,11 +203,13 @@ export class StatePoller {
       { name: "HueLamp/power",                  run: () => this.api.getAmbiHue(),       apply: (v) => this.listener.handleAmbiHueChange("poll", v as AmbiHueState) },
       { name: "ambilight/currentconfiguration", run: () => this.api.getAmbilight(),     apply: (v) => this.listener.handleAmbilightChange("poll", v as AmbilightConfiguration) },
       { name: "powerstate",                     run: () => this.api.getPowerState(),    apply: (v) => this.listener.handlePowerStateChange("poll", v as PowerState) },
+      { name: "screenstate",                    run: () => this.api.getScreenState(),   apply: (v) => this.listener.handleScreenStateChange("poll", v as ScreenState), gateCapability: "screen_on" },
       { name: "sources/current",                run: () => this.api.getCurrentSource(), apply: (v) => this.listener.handleCurrentSourceChange("poll", v as CurrentSource), gateCapability: "current_source" },
     ];
 
     let anySucceeded = false;
     let powerStateSucceeded = false;
+    let screenState: ScreenState | undefined;
     let transportError: Error | undefined;
 
     for (let i = 0; i < steps.length; i++) {
@@ -224,6 +226,7 @@ export class StatePoller {
         step.apply(value);
         anySucceeded = true;
         if (step.name === "powerstate") powerStateSucceeded = true;
+        if (step.name === "screenstate") screenState = value as ScreenState;
       } catch (err) {
         if (err instanceof OfflineError) {
           // Connectivity error - bail; no point hammering an unreachable TV.
@@ -238,12 +241,17 @@ export class StatePoller {
     }
 
     if (anySucceeded) {
-      // SAPHI/Linux can expose authenticated state endpoints while omitting
-      // GET /powerstate entirely. A completed poll proves the TV is awake;
-      // without this inference Homey remains stuck at off and its next toggle
-      // sends Wake-on-LAN instead of the Standby command.
-      if (!powerStateSucceeded && !transportError) {
-        this.listener.handlePowerStateChange("poll", { powerstate: "On" });
+      // SAPHI/Linux can keep audio and other network endpoints reachable in
+      // standby while omitting GET /powerstate. Reachability alone is not a
+      // power signal. Use the explicit screen state as the fallback so an
+      // already sleeping TV remains off in Homey.
+      if (!powerStateSucceeded && !transportError && screenState) {
+        const state = screenState.screenstate;
+        if (state === "On" || state === "screenOn") {
+          this.listener.handlePowerStateChange("poll", { powerstate: "On" });
+        } else if (state === "Off" || state === "screenOff") {
+          this.listener.handlePowerStateChange("poll", { powerstate: "Standby" });
+        }
       }
       this.noteReachable();
       this.listener.onPollSuccess?.();
